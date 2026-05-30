@@ -1,7 +1,7 @@
 import express from "express";
 import helmet from "helmet";
 import pinoHttp from "pino-http";
-import { config } from "./configs/index";
+import { serverConfig } from "./configs/server.configs";
 import rateLimit from "express-rate-limit";
 import { logger } from "./utils/logger.utils";
 import {
@@ -35,7 +35,7 @@ app.use(
 
 app.use(prometheusMiddleware);
 
-if (config.metricsEnabled) {
+if (serverConfig.metricsEnabled) {
   app.get("/metrics", async (_, res) => {
     res.set("Content-Type", prometheusRegister.contentType);
     res.end(await prometheusRegister.metrics());
@@ -46,10 +46,10 @@ app.get("/", (req, res) => {
   res.send("Hello World!");
 });
 
-app.use('/api', v1Router);
+app.use("/api", v1Router);
 
 app.use(errorMiddleware);
 
-app.listen(config.server.port, () => {
-  console.log(`Server is running on port ${config.server.port}`);
+app.listen(serverConfig.server.port, () => {
+  console.log(`Server is running on port ${serverConfig.server.port}`);
 });

@@ -24,7 +24,7 @@ class Send {
     res: Response,
     data: any,
     message = "error",
-    code = statusCode.INTERNAL_SERVER_ERROR
+    code = statusCode.INTERNAL_SERVER_ERROR,
   ) {
     res.status(code).json({
       ok: false,
