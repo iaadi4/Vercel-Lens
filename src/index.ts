@@ -3,12 +3,13 @@ import helmet from "helmet";
 import pinoHttp from "pino-http";
 import { config } from "./configs/index";
 import rateLimit from "express-rate-limit";
-import { logger } from "./utils/logger.util";
+import { logger } from "./utils/logger.utils";
 import {
   prometheusMiddleware,
-  prometheusRegister
+  prometheusRegister,
 } from "./middlewares/prometheus.middleware";
 import { errorMiddleware } from "./middlewares/error.middleware";
+import v1Router from "./routes/index";
 
 const app = express();
 
@@ -19,8 +20,8 @@ app.use(express.json());
 app.use(
   pinoHttp({
     logger,
-    genReqId: () => crypto.randomUUID()
-  })
+    genReqId: () => crypto.randomUUID(),
+  }),
 );
 
 app.use(
@@ -28,8 +29,8 @@ app.use(
     windowMs: 15 * 60 * 1000,
     max: 1000,
     standardHeaders: true,
-    legacyHeaders: false
-  })
+    legacyHeaders: false,
+  }),
 );
 
 app.use(prometheusMiddleware);
@@ -44,6 +45,8 @@ if (config.metricsEnabled) {
 app.get("/", (req, res) => {
   res.send("Hello World!");
 });
+
+app.use('/api', v1Router);
 
 app.use(errorMiddleware);
 

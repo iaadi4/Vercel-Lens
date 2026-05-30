@@ -1,11 +1,11 @@
 import { Request, Response, NextFunction } from "express";
-import { logger } from "../utils/logger.util";
+import { logger } from "../utils/logger.utils";
 
 export function errorMiddleware(
   err: Error,
   _req: Request,
   res: Response,
-  _next: NextFunction
+  _next: NextFunction,
 ) {
   logger.error(err);
   res.status(500).json({ message: "Internal Server Error" });

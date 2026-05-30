@@ -2,6 +2,9 @@ import fs from "fs";
 import path from "path";
 import YAML from "yaml";
 import { z } from "zod";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const configSchema = z.object({
     server: z.object({
@@ -14,10 +17,10 @@ const configSchema = z.object({
         maxRetries: z.number().default(3)
     }),
     secrets: z.object({
-        geminiApiKey: z.string().default(process.env.GEMINI_API_KEY || "")
+        geminiApiKey: z.string().optional().transform((val) => val || process.env.GEMINI_API_KEY || "")
     }).refine((data) => data.geminiApiKey.length > 0, {
         message: "GEMINI_API_KEY must be set in environment variables",
-        path: ["secrets", "geminiApiKey"]
+        path: ["geminiApiKey"]
     }),
     metricsEnabled: z.boolean().default(true)
 })
