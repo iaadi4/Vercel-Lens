@@ -4,6 +4,7 @@ import { queueConfig } from "../configs/queue.configs";
 interface DeploymentJobData {
   deploymentId: string;
   vercelPAT: string;
+  projectId: string;
 }
 
 const redisConfig = {
@@ -11,7 +12,7 @@ const redisConfig = {
   port: queueConfig.redis.port,
 };
 
-const worker = new Worker(
+new Worker(
   queueConfig.queue.name,
   async (job: Job<DeploymentJobData>) => {
     const { deploymentId, vercelPAT } = job.data;
@@ -19,7 +20,7 @@ const worker = new Worker(
     console.log(job.data);
 
     const response = await fetch(
-      `https://api.vercel.com/v13/deployments/${deploymentId}`,
+      `https://api.vercel.com/v3/deployments/${deploymentId}/events`,
       {
         method: "GET",
         headers: {
@@ -30,7 +31,12 @@ const worker = new Worker(
     );
 
     const data = await response.json();
-    console.log(data);
+    const readableLogs = data
+      .map((event: any) => event.text)
+      .filter((text: any) => text !== undefined && text.trim() !== "")
+      .join("\n");
+
+    console.log(readableLogs);
   },
   { connection: redisConfig },
 );

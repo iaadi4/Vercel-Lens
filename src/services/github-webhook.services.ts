@@ -20,11 +20,10 @@ const payloadReceived = (req: Request, res: Response) => {
     const deploymentId = payloadData.payload.deployment.id;
     const projectId = payloadData.payload.projectId;
 
-    logger.info({ deploymentId, projectId }, "Payload received!");
-
     queue.add("analyze-failure", {
       deploymentId,
-      vercelPAT: "", // todo: fetch from db
+      projectId,
+      vercelPAT: process.env.VERCEL_PAT, // todo: fetch from db
     });
   } else {
     logger.info(`Ignored event type: ${payloadData.type}`);
