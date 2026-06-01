@@ -7,7 +7,11 @@ ai:
   filterLLMModel: "gemini-2.5-flash"
   debugLLMProvider: "google-genai"
   filterLLMProvider: "google-genai"
-  
+
+summarize:
+  filterThresholdLines: 150
+  filterThresholdChars: 6000
+
 secrets:
   geminiApiKey: ""
 
@@ -15,5 +19,12 @@ redis:
   host: "127.0.0.1"
   port: 6379
 
-queue:
+queue1:
   name: "vercel-log-investigator"
+
+queue2:
+  name: "github-pr-bot"
+
+githubApp:
+  appId: ""
+  privateKey: ""

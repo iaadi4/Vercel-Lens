@@ -15,8 +15,11 @@ const configSchema = z.object({
       .optional()
       .default(process.env.REDIS_PASSWORD || ""),
   }),
-  queue: z.object({
+  queue1: z.object({
     name: z.string().default("vercel-log-investigator"),
+  }),
+  queue2: z.object({
+    name: z.string().default("github-pr-bot"),
   }),
   ai: z.object({
     debugLLMModel: z.string().default("gemini-2.5-pro"),
@@ -33,12 +36,25 @@ const configSchema = z.object({
       llmApiKey: z
         .string()
         .optional()
-        .transform((val) => val || process.env.LLM_API_KEY || process.env.GEMINI_API_KEY || ""),
+        .transform(
+          (val) =>
+            val || process.env.LLM_API_KEY || process.env.GEMINI_API_KEY || "",
+        ),
     })
     .refine((data) => data.llmApiKey.length > 0, {
       message: "LLM_API_KEY must be set in environment variables",
       path: ["llmApiKey"],
     }),
+  githubApp: z.object({
+    appId: z
+      .string()
+      .optional()
+      .transform((val) => val || process.env.GITHUB_APP_ID || ""),
+    privateKey: z
+      .string()
+      .optional()
+      .transform((val) => val || process.env.GITHUB_APP_PRIVATE_KEY || ""),
+  }),
 });
 
 const loadConfig = () => {
