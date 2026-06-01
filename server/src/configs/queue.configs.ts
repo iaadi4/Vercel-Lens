@@ -24,6 +24,10 @@ const configSchema = z.object({
     debugLLMProvider: z.string().default("google"),
     filterLLMProvider: z.string().default("google"),
   }),
+  summarize: z.object({
+    filterThresholdLines: z.number().default(150),
+    filterThresholdChars: z.number().default(6000),
+  }),
   secrets: z
     .object({
       llmApiKey: z

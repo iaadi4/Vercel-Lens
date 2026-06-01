@@ -19,7 +19,7 @@ const jobOptions = {
   removeOnFail: { count: 50 },
 };
 
-const payloadReceived = (req: Request, res: Response) => {
+const payloadReceived = async (req: Request, res: Response) => {
   const payloadData = payload.parse(req.body);
   Send.success(res, {});
 

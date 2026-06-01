@@ -9,6 +9,7 @@ import {
   FilteredLogSchema,
 } from "../types/debug-report.types";
 import { queueConfig } from "../configs/queue.configs";
+import { logger } from "../utils/logger.utils";
 
 type Chains = {
   filterChain: RunnableSequence;
@@ -115,14 +116,54 @@ async function getChains(): Promise<Chains> {
   return chains;
 }
 
+// Logs below this size go straight to the debug chain — no filter LLM needed.
+const FILTER_THRESHOLD_LINES = queueConfig.summarize.filterThresholdLines;
+const FILTER_THRESHOLD_CHARS = queueConfig.summarize.filterThresholdChars;
+
+function needsFiltering(rawLogs: string): boolean {
+  const lines = rawLogs.split("\n").length;
+  return (
+    lines > FILTER_THRESHOLD_LINES || rawLogs.length > FILTER_THRESHOLD_CHARS
+  );
+}
+
 export async function runLLMDebugger(
   deploymentId: string,
   rawLogs: string,
 ): Promise<DeploymentDebug> {
   const { filterChain, debugChain } = await getChains();
 
-  const rawFiltered = await filterChain.invoke({ deploymentId, rawLogs });
-  const filtered = FilteredLogSchema.parse(rawFiltered);
+  let filtered: FilteredLog;
+
+  if (needsFiltering(rawLogs)) {
+    logger.info(
+      {
+        deploymentId,
+        lines: rawLogs.split("\n").length,
+        chars: rawLogs.length,
+      },
+      "Logs exceed threshold — running filter chain first",
+    );
+    const rawFiltered = await filterChain.invoke({ deploymentId, rawLogs });
+    filtered = FilteredLogSchema.parse(rawFiltered);
+  } else {
+    logger.info(
+      {
+        deploymentId,
+        lines: rawLogs.split("\n").length,
+        chars: rawLogs.length,
+      },
+      "Logs within threshold — skipping filter chain",
+    );
+    filtered = {
+      errorType: "unknown",
+      errorMessage: rawLogs,
+      relevantFiles: [],
+      rawErrorLines: rawLogs.split("\n").filter((l) => l.trim()),
+      phase: "unknown",
+    };
+  }
+
   const rawDebug = await debugChain.invoke({
     deploymentId,
     phase: filtered.phase,
