@@ -18,6 +18,23 @@ const configSchema = z.object({
   queue: z.object({
     name: z.string().default("vercel-log-investigator"),
   }),
+  ai: z.object({
+    debugLLMModel: z.string().default("gemini-2.5-pro"),
+    filterLLMModel: z.string().default("gemini-1.5-flash"),
+    debugLLMProvider: z.string().default("google"),
+    filterLLMProvider: z.string().default("google"),
+  }),
+  secrets: z
+    .object({
+      llmApiKey: z
+        .string()
+        .optional()
+        .transform((val) => val || process.env.LLM_API_KEY || process.env.GEMINI_API_KEY || ""),
+    })
+    .refine((data) => data.llmApiKey.length > 0, {
+      message: "LLM_API_KEY must be set in environment variables",
+      path: ["llmApiKey"],
+    }),
 });
 
 const loadConfig = () => {
