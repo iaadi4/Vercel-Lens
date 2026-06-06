@@ -1,3 +1,6 @@
 allowBuilds:
+  cpu-features: true
   esbuild: false
   msgpackr-extract: false
+  protobufjs: true
+  ssh2: true

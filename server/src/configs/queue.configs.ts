@@ -21,6 +21,9 @@ const configSchema = z.object({
   queue2: z.object({
     name: z.string().default("github-pr-bot"),
   }),
+  queue3: z.object({
+    name: z.string().default("docker-verifier"),
+  }),
   ai: z.object({
     debugLLMModel: z.string().default("gemini-2.5-pro"),
     filterLLMModel: z.string().default("gemini-1.5-flash"),
