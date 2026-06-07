@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "worker:vercel": "tsx watch src/workers/vercel-investigator.workers.ts",
     "worker:github": "tsx watch src/workers/github-pr.workers.ts",
-    "worker:docker": "tsx watch src/workers/docker-verifier.workers.ts"
+    "worker:build": "tsx watch src/workers/build-verifier.workers.ts"
   },
   "keywords": [],
   "author": "",

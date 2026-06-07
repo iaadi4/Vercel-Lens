@@ -8,62 +8,49 @@ interface GithubCommitCommentData {
   installationId: number;
   owner: string;
   repo: string;
-  commit_sha: string;
+  commitSha: string;
   body: string;
-  deploymentId: string;
 }
 
-const redisConfig = {
-  host: queueConfig.redis.host,
-  port: queueConfig.redis.port,
-};
+const redisConfig = { host: queueConfig.redis.host, port: queueConfig.redis.port };
 
-const privateKeyBase64 = queueConfig.githubApp.privateKey;
-const privateKey = privateKeyBase64
-  ? Buffer.from(privateKeyBase64, "base64").toString("utf8")
+const privateKey = queueConfig.githubApp.privateKey
+  ? Buffer.from(queueConfig.githubApp.privateKey, "base64").toString("utf-8")
   : undefined;
 
 const octokit = new Octokit({
   authStrategy: createAppAuth,
-  auth: {
-    appId: queueConfig.githubApp.appId,
-    privateKey,
-  },
+  auth: { appId: queueConfig.githubApp.appId, privateKey },
 });
 
 const worker = new Worker(
-  queueConfig.queue2.name,
+  queueConfig.queue3.name,
   async (job: Job<GithubCommitCommentData>) => {
-    const { owner, repo, commit_sha, body } = job.data;
-
-    const installationId = process.env.INSTALLATION_ID;
+    const { owner, repo, commitSha, body, installationId } = job.data;
 
     const auth = (await octokit.auth({
       type: "installation",
       installationId,
     })) as { token: string };
 
-    const installationOctokit = new Octokit({
-      auth: auth.token,
-    });
+    const installationOctokit = new Octokit({ auth: auth.token });
 
     await installationOctokit.rest.repos.createCommitComment({
       owner,
       repo,
-      commit_sha,
+      commit_sha: commitSha,
       body,
     });
   },
-  { connection: redisConfig },
+  {
+    connection: redisConfig,
+    limiter: { max: 10, duration: 1000 },
+  },
 );
 
-worker.on("completed", (job, err) => {
-  logger.info({ jobId: job.id }, "Job completed");
-});
-
-worker.on("failed", (job, err) => {
-  logger.error(
-    { jobId: job?.id, deploymentId: job?.data?.deploymentId, err: err.message },
-    "Job failed",
-  );
-});
+worker.on("completed", (job) =>
+  logger.info({ jobId: job.id, owner: job.data.owner, repo: job.data.repo }, "Commit comment posted"),
+);
+worker.on("failed", (job, err) =>
+  logger.error({ jobId: job?.id, owner: job?.data?.owner, repo: job?.data?.repo, err: err.message }, "Job failed"),
+);

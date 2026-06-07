@@ -21,63 +21,39 @@ const jobOptions = {
   removeOnFail: { count: 50 },
 };
 
-const queue = new Queue(queueConfig.queue3.name, {
-  connection: redisConfig,
-});
+const patchQueue = new Queue(queueConfig.queue2.name, { connection: redisConfig });
 
-async function fetchDeploymentLogs(
-  deploymentId: string,
-  vercelPAT: string,
-): Promise<{
-  logs: string;
-  repoName: string;
-  owner: string;
-  commitSha: string;
-  rootDirectory: string | null;
-}> {
-  const metaRes = await fetch(
-    `https://api.vercel.com/v13/deployments/${deploymentId}`,
-    {
-      headers: { Authorization: `Bearer ${vercelPAT}` },
-    },
-  );
+async function fetchDeploymentLogs(deploymentId: string, vercelPAT: string) {
+  const metaRes = await fetch(`https://api.vercel.com/v13/deployments/${deploymentId}`, {
+    headers: { Authorization: `Bearer ${vercelPAT}` },
+  });
 
-  if (metaRes.status === 401 || metaRes.status === 403) {
-    throw new UnrecoverableError(
-      `Vercel auth failed (${metaRes.status}) — check your PAT`,
-    );
-  }
+  if (metaRes.status === 401 || metaRes.status === 403)
+    throw new UnrecoverableError(`Vercel auth failed (${metaRes.status}) — check your PAT`);
   if (!metaRes.ok)
-    throw new Error(`Vercel Metadata API error: ${metaRes.status}`);
+    throw new Error(`Vercel metadata API error: ${metaRes.status}`);
+
   const metaData = await metaRes.json();
 
-  const res = await fetch(
-    `https://api.vercel.com/v3/deployments/${deploymentId}/events`,
-    {
-      headers: { Authorization: `Bearer ${vercelPAT}` },
-    },
-  );
+  const eventsRes = await fetch(`https://api.vercel.com/v3/deployments/${deploymentId}/events`, {
+    headers: { Authorization: `Bearer ${vercelPAT}` },
+  });
 
-  if (res.status === 401 || res.status === 403) {
-    throw new UnrecoverableError(
-      `Vercel auth failed (${res.status}) — check your PAT`,
-    );
-  }
-  if (!res.ok) {
-    throw new Error(`Vercel API error: ${res.status}`);
-  }
+  if (eventsRes.status === 401 || eventsRes.status === 403)
+    throw new UnrecoverableError(`Vercel auth failed (${eventsRes.status}) — check your PAT`);
+  if (!eventsRes.ok)
+    throw new Error(`Vercel events API error: ${eventsRes.status}`);
 
-  const data = await res.json();
-  const compiledLogs = data
-    .map((event: any) => event.text)
-    .filter((text: any) => typeof text === "string" && text.trim() !== "")
+  const events = await eventsRes.json();
+  const logs = events
+    .map((e: any) => e.text)
+    .filter((t: any) => typeof t === "string" && t.trim())
     .join("\n");
 
   return {
-    logs: compiledLogs,
+    logs,
     repoName: metaData.meta?.githubRepo || "",
-    owner:
-      metaData.meta?.githubCommitOrg || metaData.meta?.githubOrg || "iaadi4",
+    owner: metaData.meta?.githubCommitOrg || metaData.meta?.githubOrg || "iaadi4",
     commitSha: metaData.gitSource?.sha || metaData.meta?.githubCommitSha || "",
     rootDirectory: (metaData.rootDirectory as string | null) ?? null,
   };
@@ -86,56 +62,36 @@ async function fetchDeploymentLogs(
 const worker = new Worker(
   queueConfig.queue1.name,
   async (job: Job<DeploymentJobData>) => {
-    const { deploymentId, vercelPAT, projectId } = job.data;
-
-    logger.info(
-      { jobId: job.id, deploymentId, attempt: job.attemptsMade + 1 },
-      "Job started",
-    );
+    const { deploymentId, vercelPAT } = job.data;
+    logger.info({ jobId: job.id, deploymentId, attempt: job.attemptsMade + 1 }, "Job started");
 
     const result = await fetchDeploymentLogs(deploymentId, vercelPAT);
     if (!result.logs.trim()) {
-      logger.warn({ jobId: job.id }, "No logs returned — skipping LLM");
+      logger.warn({ jobId: job.id }, "No logs returned — skipping");
       return;
     }
 
     const llmOutput = await runLLMDebugger(deploymentId, result.logs);
-    logger.info({ jobId: job.id, result }, "Debug result ready");
+    logger.info({ jobId: job.id, confidence: llmOutput.confidence, patchCount: llmOutput.patches.length }, "LLM debug complete");
 
-    const formatSuggestedFixes = (fix: string | string[]): string => {
-      const fixes = Array.isArray(fix) ? fix : [fix];
-      return fixes.map((f, i) => `${i + 1}. ${f}`).join("\n");
+    const formatFixes = (fix: string | string[]) =>
+      (Array.isArray(fix) ? fix : [fix]).map((f, i) => `${i + 1}. ${f}`).join("\n");
+
+    const formatFiles = (files: typeof llmOutput.affectedFiles) => {
+      if (!files?.length) return "_No specific files identified._";
+      return files.map((f) => {
+        const loc = f.lineNumber ? ` · Line ${f.lineNumber}` : "";
+        const snip = f.snippet ? `\n\`\`\`\n${f.snippet}\n\`\`\`` : "";
+        return `- \`${f.filePath}\`${loc}${snip}`;
+      }).join("\n");
     };
 
-    const formatAffectedFiles = (
-      files: typeof llmOutput.affectedFiles,
-    ): string => {
-      if (!files || files.length === 0)
-        return "_No specific files identified._";
+    const confidenceBadge = { high: "🟢 HIGH", medium: "🟡 MEDIUM", low: "🔴 LOW" };
+    const refsSection = llmOutput.references?.length
+      ? `\n### 🔗 Helpful references\n\n${llmOutput.references.map((r) => `- [${r}](${r})`).join("\n")}\n`
+      : "";
 
-      return files
-        .map((file) => {
-          const location = file.lineNumber ? ` · Line ${file.lineNumber}` : "";
-          const snippet = file.snippet
-            ? `\n\`\`\`\n${file.snippet}\n\`\`\``
-            : "";
-          return `- \`${file.filePath}\`${location}${snippet}`;
-        })
-        .join("\n");
-    };
-
-    const confidenceBadge: Record<typeof llmOutput.confidence, string> = {
-      high: "🟢 HIGH",
-      medium: "🟡 MEDIUM",
-      low: "🔴 LOW",
-    };
-
-    const refsSection =
-      llmOutput.references && llmOutput.references.length > 0
-        ? `\n### 🔗 Helpful references\n\n${llmOutput.references.map((ref) => `- [${ref}](${ref})`).join("\n")}\n`
-        : "";
-
-    const commentMarkdownBody = `### 🔍 VercelLens build analysis
+    const body = `### 🔍 VercelLens build analysis
 
 > **Repo:** \`${result.repoName}\` · **Commit:** \`${result.commitSha.slice(0, 7)}\`
 
@@ -155,41 +111,36 @@ ${llmOutput.rootCause}
 
 ### 🛠️ Suggested fixes
 
-${formatSuggestedFixes(llmOutput.suggestedFix)}
+${formatFixes(llmOutput.suggestedFix)}
 
 ### 📂 Affected files
 
-${formatAffectedFiles(llmOutput.affectedFiles)}
+${formatFiles(llmOutput.affectedFiles)}
 ${refsSection}
 ---
 
 _Generated by VercelLens · Confidence: ${confidenceBadge[llmOutput.confidence]}_`;
 
-    queue.add(
-      "check-docker-build",
+    await patchQueue.add(
+      "apply-patches",
       {
         owner: result.owner,
         repo: result.repoName,
-        commit_sha: result.commitSha,
+        commitSha: result.commitSha,
         rootDirectory: result.rootDirectory,
-        body: commentMarkdownBody,
+        patches: llmOutput.patches,
+        body,
+        attempt: 1,
       },
       jobOptions,
     );
   },
-  {
-    connection: redisConfig,
-    lockDuration: 5 * 60 * 1000,
-  },
+  { connection: redisConfig, lockDuration: 5 * 60 * 1000 },
 );
 
-worker.on("failed", (job, err) => {
-  logger.error(
-    { jobId: job?.id, deploymentId: job?.data?.deploymentId, err: err.message },
-    "Job failed",
-  );
-});
-
-worker.on("completed", (job) => {
-  logger.info({ jobId: job.id }, "Job completed");
-});
+worker.on("failed", (job, err) =>
+  logger.error({ jobId: job?.id, deploymentId: job?.data?.deploymentId, err: err.message }, "Job failed"),
+);
+worker.on("completed", (job) =>
+  logger.info({ jobId: job.id }, "Job completed"),
+);
