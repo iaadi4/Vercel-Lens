@@ -1,15 +1,12 @@
 import { Job, Worker, Queue } from "bullmq";
+import { Daytona, type Sandbox } from "@daytona/sdk";
 import { queueConfig } from "../configs/queue.configs";
 import { runLLMDebugger } from "../services/llm-debugger.services";
 import { FilePatch } from "../types/debug-report.types";
 import { logger } from "../utils/logger.utils";
-import { spawnSync, execSync } from "child_process";
-import path from "path";
-import fs from "fs";
-import os from "os";
 
 const MAX_FIX_ATTEMPTS = 3;
-const BUILD_TIMEOUT_MS = 5 * 60 * 1000;
+const BUILD_TIMEOUT_SECONDS = 5 * 60;
 
 interface BuildJobData {
   owner: string;
@@ -28,7 +25,7 @@ const redisConfig = {
 
 const jobOptions = {
   attempts: 3,
-  backoff: { type: "exponential", delay: 5000 },
+  backoff: { type: "exponential" as const, delay: 5000 },
   removeOnComplete: { count: 100 },
   removeOnFail: { count: 50 },
 };
@@ -38,73 +35,71 @@ const buildQueue = new Queue(queueConfig.queue2.name, {
 });
 const prQueue = new Queue(queueConfig.queue3.name, { connection: redisConfig });
 
-export function prepareWorkspace(
+const daytona = new Daytona();
+
+const WORKSPACE_DIR = "/home/daytona/project";
+
+export async function prepareWorkspace(
+  sandbox: Sandbox,
   repoUrl: string,
   commitSha: string,
-  jobId: string,
-): string {
-  const workspacePath = path.join(os.tmpdir(), `vercellens-${jobId}`);
-  if (fs.existsSync(workspacePath))
-    fs.rmSync(workspacePath, { recursive: true, force: true });
-  execSync(`git clone --filter=blob:none ${repoUrl} ${workspacePath}`, {
-    stdio: "ignore",
-  });
-  execSync(`git -C ${workspacePath} checkout ${commitSha}`, {
-    stdio: "ignore",
-  });
-  return workspacePath;
+): Promise<string> {
+  await sandbox.git.clone(
+    repoUrl,
+    WORKSPACE_DIR,
+    undefined,   // branch — not needed
+    commitSha,   // checkout this specific commit
+  );
+
+  return WORKSPACE_DIR;
 }
 
-export function resolveProjectRoot(
+export async function resolveProjectRoot(
+  sandbox: Sandbox,
   repoRoot: string,
   rootDirectory: string | null,
-): string {
+): Promise<string> {
   if (rootDirectory) {
-    const fromVercel = path.join(repoRoot, rootDirectory);
-    if (fs.existsSync(fromVercel)) {
-      logger.info({ fromVercel }, "Using rootDirectory from Vercel API");
-      return fromVercel;
-    }
-    logger.warn(
-      { rootDirectory, fromVercel },
-      "Vercel rootDirectory not found — falling back to scan",
-    );
-  }
-
-  const IGNORE_DIRS = new Set([
-    "node_modules",
-    ".git",
-    ".next",
-    "dist",
-    "build",
-    ".vercel",
-  ]);
-  let firstPkgDir: string | null = null;
-  let firstBuildPkgDir: string | null = null;
-  const queue: string[] = [repoRoot];
-
-  while (queue.length > 0 && firstBuildPkgDir === null) {
-    const dir = queue.shift()!;
-    const pkgPath = path.join(dir, "package.json");
-    if (fs.existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-        if (firstPkgDir === null) firstPkgDir = dir;
-        if (pkg.scripts?.build) {
-          firstBuildPkgDir = dir;
-          break;
-        }
-      } catch {
-        /* skip malformed */
-      }
-    }
+    const fromVercel = `${repoRoot}/${rootDirectory}`;
     try {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (entry.isDirectory() && !IGNORE_DIRS.has(entry.name))
-          queue.push(path.join(dir, entry.name));
+      const info = await sandbox.fs.getFileDetails(fromVercel);
+      if (info) {
+        logger.info({ fromVercel }, "Using rootDirectory from Vercel API");
+        return fromVercel;
       }
     } catch {
-      /* skip unreadable */
+      logger.warn(
+        { rootDirectory, fromVercel },
+        "Vercel rootDirectory not found — falling back to scan",
+      );
+    }
+  }
+
+  // BFS scan for package.json with a `build` script.
+  // Uses a shell find + node one-liner to keep it in one round-trip.
+  const scanResult = await sandbox.process.executeCommand(
+    `find "${repoRoot}" \\( -name node_modules -o -name .git -o -name .next -o -name dist -o -name build -o -name .vercel \\) -prune -o -name package.json -print 2>/dev/null | head -50 | while IFS= read -r pkg; do
+      dir=$(dirname "$pkg")
+      if node -e "const p=JSON.parse(require('fs').readFileSync('$pkg','utf8')); process.exit(p.scripts && p.scripts.build ? 0 : 1)" 2>/dev/null; then
+        echo "BUILD:$dir"
+      else
+        echo "PKG:$dir"
+      fi
+    done`,
+  );
+
+  const lines = scanResult.result.trim().split("\n").filter(Boolean);
+
+  let firstPkgDir: string | null = null;
+  let firstBuildPkgDir: string | null = null;
+
+  for (const line of lines) {
+    if (line.startsWith("BUILD:") && !firstBuildPkgDir) {
+      firstBuildPkgDir = line.slice(6);
+      break;
+    }
+    if (line.startsWith("PKG:") && !firstPkgDir) {
+      firstPkgDir = line.slice(4);
     }
   }
 
@@ -113,68 +108,100 @@ export function resolveProjectRoot(
   return resolved;
 }
 
-export function analyzeWorkspace(projectRoot: string, repoRoot: string) {
-  const searchDirs = [...new Set([projectRoot, repoRoot])];
+export async function analyzeWorkspace(
+  sandbox: Sandbox,
+  projectRoot: string,
+  repoRoot: string,
+) {
+  // Detect package manager from lockfiles
+  const lockCheck = await sandbox.process.executeCommand(
+    `for dir in "${projectRoot}" "${repoRoot}"; do
+      [ -f "$dir/pnpm-lock.yaml" ] && echo "pnpm" && exit 0
+      [ -f "$dir/yarn.lock" ]      && echo "yarn" && exit 0
+      [ -f "$dir/bun.lockb" ]      && echo "bun"  && exit 0
+    done
+    echo "npm"`,
+  );
+
+  const detected = lockCheck.result.trim();
   let packageManager = "npm";
   let installCmd = "npm install";
 
-  for (const dir of searchDirs) {
-    if (fs.existsSync(path.join(dir, "pnpm-lock.yaml"))) {
-      packageManager = "pnpm";
-      installCmd = "pnpm install --no-frozen-lockfile";
-      break;
-    } else if (fs.existsSync(path.join(dir, "yarn.lock"))) {
-      packageManager = "yarn";
-      installCmd = "yarn install";
-      break;
-    } else if (fs.existsSync(path.join(dir, "bun.lockb"))) {
-      packageManager = "bun";
-      installCmd = "bun install";
-      break;
-    }
+  if (detected === "pnpm") {
+    packageManager = "pnpm";
+    installCmd = "pnpm install --no-frozen-lockfile";
+  } else if (detected === "yarn") {
+    packageManager = "yarn";
+    installCmd = "yarn install";
+  } else if (detected === "bun") {
+    packageManager = "bun";
+    installCmd = "bun install";
   }
 
-  const pkgPath = path.join(projectRoot, "package.json");
-  if (!fs.existsSync(pkgPath))
+  // Read package.json to determine build command
+  let pkgContent: Buffer;
+  try {
+    pkgContent = await sandbox.fs.downloadFile(`${projectRoot}/package.json`);
+  } catch {
     throw new Error(
       `No package.json found in resolved project root: ${projectRoot}`,
     );
+  }
 
-  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+  const pkg = JSON.parse(pkgContent.toString("utf-8"));
   const buildCmd = pkg.scripts?.build ? `${packageManager} run build` : null;
+
   return { installCmd, buildCmd, packageManager };
 }
 
-function applyPatches(projectRoot: string, patches: FilePatch[]): string[] {
+async function applyPatches(
+  sandbox: Sandbox,
+  projectRoot: string,
+  patches: FilePatch[],
+): Promise<string[]> {
   const failed: string[] = [];
 
   for (const patch of patches) {
-    const absPath = path.join(projectRoot, patch.filePath);
+    const absPath = `${projectRoot}/${patch.filePath}`;
     try {
       if (patch.type === "delete") {
-        fs.rmSync(absPath, { force: true });
+        await sandbox.fs.deleteFile(absPath);
         continue;
       }
       if (patch.type === "create") {
-        fs.mkdirSync(path.dirname(absPath), { recursive: true });
-        fs.writeFileSync(absPath, patch.replace ?? "", "utf-8");
+        // Ensure parent directory exists
+        const parentDir = absPath.substring(0, absPath.lastIndexOf("/"));
+        await sandbox.process.executeCommand(`mkdir -p "${parentDir}"`);
+        await sandbox.fs.uploadFile(
+          Buffer.from(patch.replace ?? "", "utf-8"),
+          absPath,
+        );
         continue;
       }
-      // edit
+
+      // edit — find-and-replace
       if (!patch.find) {
         failed.push(patch.filePath);
         continue;
       }
-      const original = fs.readFileSync(absPath, "utf-8");
+
+      // Download the file, apply the patch locally, re-upload
+      let original: string;
+      try {
+        const buf = await sandbox.fs.downloadFile(absPath);
+        original = buf.toString("utf-8");
+      } catch {
+        failed.push(patch.filePath);
+        continue;
+      }
+
       if (!original.includes(patch.find)) {
         failed.push(patch.filePath);
         continue;
       }
-      fs.writeFileSync(
-        absPath,
-        original.replace(patch.find, patch.replace ?? ""),
-        "utf-8",
-      );
+
+      const newContent = original.replace(patch.find, patch.replace ?? "");
+      await sandbox.fs.uploadFile(Buffer.from(newContent, "utf-8"), absPath);
     } catch (err: any) {
       logger.warn(
         { filePath: patch.filePath, err: err.message },
@@ -194,62 +221,53 @@ export interface RunResult {
   timedOut: boolean;
 }
 
-export function runBuild(
+export async function runBuild(
+  sandbox: Sandbox,
   projectRoot: string,
   repoRoot: string,
   installCmd: string,
   buildCmd: string | null,
-): RunResult {
+): Promise<RunResult> {
   const logs: string[] = [];
 
-  const safeEnv: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
-    HOME: repoRoot,
-    npm_config_cache: path.join(repoRoot, ".npm-cache"),
-    npm_config_prefix: path.join(repoRoot, ".npm-prefix"),
+  const buildEnv: Record<string, string> = {
     CI: "true",
     NODE_ENV: "production",
   };
 
-  function run(
-    cmd: string,
-    cwd: string,
-  ): { exitCode: number | null; timedOut: boolean } {
-    const [bin, ...args] = cmd.split(" ");
-    const result = spawnSync(bin, args, {
-      cwd,
-      env: safeEnv,
-      timeout: BUILD_TIMEOUT_MS,
-      maxBuffer: 10 * 1024 * 1024,
-      encoding: "utf8",
-    });
-    const combined = [result.stdout, result.stderr]
-      .filter(Boolean)
-      .join("\n")
-      .trim();
-    if (combined) logs.push(combined);
+  // --- install ---
+  const installResult = await sandbox.process.executeCommand(
+    `${installCmd} 2>&1`,
+    repoRoot,
+    buildEnv,
+    BUILD_TIMEOUT_SECONDS,
+  );
+  if (installResult.result.trim()) logs.push(installResult.result.trim());
+
+  if (installResult.exitCode !== 0) {
     return {
-      exitCode: result.status,
-      timedOut: result.signal === "SIGTERM" && result.status === null,
+      success: false,
+      exitCode: installResult.exitCode,
+      logs: logs.join("\n"),
+      timedOut: installResult.exitCode === 124,
     };
   }
 
-  const install = run(installCmd, repoRoot);
-  if (install.timedOut || install.exitCode !== 0)
-    return {
-      success: false,
-      exitCode: install.exitCode,
-      logs: logs.join("\n"),
-      timedOut: install.timedOut,
-    };
-
+  // --- build ---
   if (buildCmd) {
-    const build = run(buildCmd, projectRoot);
+    const buildResult = await sandbox.process.executeCommand(
+      `${buildCmd} 2>&1`,
+      projectRoot,
+      buildEnv,
+      BUILD_TIMEOUT_SECONDS,
+    );
+    if (buildResult.result.trim()) logs.push(buildResult.result.trim());
+
     return {
-      success: build.exitCode === 0,
-      exitCode: build.exitCode,
+      success: buildResult.exitCode === 0,
+      exitCode: buildResult.exitCode,
       logs: logs.join("\n"),
-      timedOut: build.timedOut,
+      timedOut: buildResult.exitCode === 124,
     };
   }
 
@@ -280,13 +298,30 @@ const worker = new Worker(
     logger.info({ jobId: job.id, repo, attempt }, "Build verifier started");
 
     const repoUrl = `https://github.com/${owner}/${repo}.git`;
-    const repoRoot = prepareWorkspace(repoUrl, commitSha, job.id!);
+
+    // Create an ephemeral Daytona sandbox for the build
+    const sandbox = await daytona.create({
+      language: "typescript",
+      envVars: { CI: "true", NODE_ENV: "production" },
+      autoStopInterval: 10,
+      autoDeleteInterval: 0,
+    });
+
+    logger.info(
+      { jobId: job.id, sandboxId: sandbox.id },
+      "Daytona sandbox created",
+    );
 
     try {
-      const projectRoot = resolveProjectRoot(repoRoot, rootDirectory);
-      const { installCmd, buildCmd } = analyzeWorkspace(projectRoot, repoRoot);
+      const repoRoot = await prepareWorkspace(sandbox, repoUrl, commitSha);
+      const projectRoot = resolveProjectRoot(sandbox, repoRoot, rootDirectory);
+      const { installCmd, buildCmd } = await analyzeWorkspace(
+        sandbox,
+        await projectRoot,
+        repoRoot,
+      );
 
-      const failedPatches = applyPatches(projectRoot, patches);
+      const failedPatches = await applyPatches(sandbox, await projectRoot, patches);
       if (failedPatches.length)
         logger.warn({ failedPatches }, "Some patches could not be applied");
 
@@ -294,7 +329,13 @@ const worker = new Worker(
         { jobId: job.id, attempt, installCmd, buildCmd },
         "Starting build",
       );
-      const buildResult = runBuild(projectRoot, repoRoot, installCmd, buildCmd);
+      const buildResult = await runBuild(
+        sandbox,
+        await projectRoot,
+        repoRoot,
+        installCmd,
+        buildCmd,
+      );
       logger.info(
         { jobId: job.id, attempt, success: buildResult.success },
         "Build finished",
@@ -356,8 +397,18 @@ const worker = new Worker(
 
       return { success: false, attempt, retrying: true };
     } finally {
-      if (fs.existsSync(repoRoot))
-        fs.rmSync(repoRoot, { recursive: true, force: true });
+      try {
+        await sandbox.delete();
+        logger.info(
+          { jobId: job.id, sandboxId: sandbox.id },
+          "Daytona sandbox deleted",
+        );
+      } catch (cleanupErr: any) {
+        logger.warn(
+          { jobId: job.id, sandboxId: sandbox.id, err: cleanupErr.message },
+          "Failed to delete Daytona sandbox",
+        );
+      }
     }
   },
   { connection: redisConfig, lockDuration: 10 * 60 * 1000 },
