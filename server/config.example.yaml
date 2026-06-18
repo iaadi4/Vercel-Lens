@@ -3,17 +3,17 @@ server:
   env: "development"
 
 ai:
-  debugLLMModel: "gemini-2.5-pro"
-  filterLLMModel: "gemini-2.5-flash"
-  debugLLMProvider: "google-genai"
-  filterLLMProvider: "google-genai"
+  debugLLMModel: "llama-3.3-70b-versatile"
+  filterLLMModel: "llama-3.1-8b-instant"
+  debugLLMProvider: "groq"
+  filterLLMProvider: "groq"
 
 summarize:
   filterThresholdLines: 150
   filterThresholdChars: 6000
 
 secrets:
-  geminiApiKey: ""
+  groqApiKey: ""
 
 redis:
   host: "127.0.0.1"

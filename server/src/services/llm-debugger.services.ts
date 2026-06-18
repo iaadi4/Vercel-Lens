@@ -86,7 +86,7 @@ async function getChains(): Promise<Chains> {
   if (chains) return chains;
 
   if (queueConfig.secrets.llmApiKey) {
-    process.env.GOOGLE_API_KEY = queueConfig.secrets.llmApiKey;
+    process.env.GROQ_API_KEY = queueConfig.secrets.llmApiKey;
   }
 
   const filterModel = await initChatModel(queueConfig.ai.filterLLMModel, {
@@ -100,8 +100,16 @@ async function getChains(): Promise<Chains> {
   });
 
   chains = {
-    filterChain: RunnableSequence.from([filterPrompt, filterModel, new JsonOutputParser<FilteredLog>()]),
-    debugChain: RunnableSequence.from([debugPrompt, debugModel, new JsonOutputParser<DeploymentDebug>()]),
+    filterChain: RunnableSequence.from([
+      filterPrompt,
+      filterModel,
+      new JsonOutputParser<FilteredLog>(),
+    ]),
+    debugChain: RunnableSequence.from([
+      debugPrompt,
+      debugModel,
+      new JsonOutputParser<DeploymentDebug>(),
+    ]),
   };
 
   return chains;
@@ -126,10 +134,26 @@ export async function runLLMDebugger(
   let filtered: FilteredLog;
 
   if (needsFiltering(rawLogs)) {
-    logger.info({ deploymentId, lines: rawLogs.split("\n").length, chars: rawLogs.length }, "Logs exceed threshold — running filter chain");
-    filtered = FilteredLogSchema.parse(await filterChain.invoke({ deploymentId, rawLogs }));
+    logger.info(
+      {
+        deploymentId,
+        lines: rawLogs.split("\n").length,
+        chars: rawLogs.length,
+      },
+      "Logs exceed threshold — running filter chain",
+    );
+    filtered = FilteredLogSchema.parse(
+      await filterChain.invoke({ deploymentId, rawLogs }),
+    );
   } else {
-    logger.info({ deploymentId, lines: rawLogs.split("\n").length, chars: rawLogs.length }, "Logs within threshold — skipping filter chain");
+    logger.info(
+      {
+        deploymentId,
+        lines: rawLogs.split("\n").length,
+        chars: rawLogs.length,
+      },
+      "Logs within threshold — skipping filter chain",
+    );
     filtered = {
       errorType: "unknown",
       errorMessage: rawLogs,

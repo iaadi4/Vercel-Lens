@@ -25,10 +25,10 @@ const configSchema = z.object({
     name: z.string().default("docker-verifier"),
   }),
   ai: z.object({
-    debugLLMModel: z.string().default("gemini-2.5-pro"),
-    filterLLMModel: z.string().default("gemini-1.5-flash"),
-    debugLLMProvider: z.string().default("google"),
-    filterLLMProvider: z.string().default("google"),
+    debugLLMModel: z.string().default("llama-3.3-70b-versatile"),
+    filterLLMModel: z.string().default("llama-3.1-8b-instant"),
+    debugLLMProvider: z.string().default("groq"),
+    filterLLMProvider: z.string().default("groq"),
   }),
   summarize: z.object({
     filterThresholdLines: z.number().default(150),
@@ -41,7 +41,7 @@ const configSchema = z.object({
         .optional()
         .transform(
           (val) =>
-            val || process.env.LLM_API_KEY || process.env.GEMINI_API_KEY || "",
+            val || process.env.LLM_API_KEY || process.env.GROQ_API_KEY || "",
         ),
     })
     .refine((data) => data.llmApiKey.length > 0, {
