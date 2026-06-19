@@ -15,14 +15,20 @@ const configSchema = z.object({
       .optional()
       .default(process.env.REDIS_PASSWORD || ""),
   }),
-  queue: z.object({
+  queue1: z.object({
     name: z.string().default("vercel-log-investigator"),
   }),
+  queue2: z.object({
+    name: z.string().default("github-pr-bot"),
+  }),
+  queue3: z.object({
+    name: z.string().default("docker-verifier"),
+  }),
   ai: z.object({
-    debugLLMModel: z.string().default("gemini-2.5-pro"),
-    filterLLMModel: z.string().default("gemini-1.5-flash"),
-    debugLLMProvider: z.string().default("google"),
-    filterLLMProvider: z.string().default("google"),
+    debugLLMModel: z.string().default("llama-3.3-70b-versatile"),
+    filterLLMModel: z.string().default("llama-3.1-8b-instant"),
+    debugLLMProvider: z.string().default("groq"),
+    filterLLMProvider: z.string().default("groq"),
   }),
   summarize: z.object({
     filterThresholdLines: z.number().default(150),
@@ -33,12 +39,25 @@ const configSchema = z.object({
       llmApiKey: z
         .string()
         .optional()
-        .transform((val) => val || process.env.LLM_API_KEY || process.env.GEMINI_API_KEY || ""),
+        .transform(
+          (val) =>
+            val || process.env.LLM_API_KEY || process.env.GROQ_API_KEY || "",
+        ),
     })
     .refine((data) => data.llmApiKey.length > 0, {
       message: "LLM_API_KEY must be set in environment variables",
       path: ["llmApiKey"],
     }),
+  githubApp: z.object({
+    appId: z
+      .string()
+      .optional()
+      .transform((val) => val || process.env.GITHUB_APP_ID || ""),
+    privateKey: z
+      .string()
+      .optional()
+      .transform((val) => val || process.env.GITHUB_APP_PRIVATE_KEY || ""),
+  }),
 });
 
 const loadConfig = () => {

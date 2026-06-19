@@ -1,4 +1,4 @@
-import { Job, Worker, UnrecoverableError } from "bullmq";
+import { Job, Worker, UnrecoverableError, Queue } from "bullmq";
 import { queueConfig } from "../configs/queue.configs";
 import { runLLMDebugger } from "../services/llm-debugger.services";
 import { logger } from "../utils/logger.utils";
@@ -14,65 +14,133 @@ const redisConfig = {
   port: queueConfig.redis.port,
 };
 
-async function fetchDeploymentLogs(
-  deploymentId: string,
-  vercelPAT: string,
-): Promise<string> {
-  const res = await fetch(
-    `https://api.vercel.com/v3/deployments/${deploymentId}/events`,
-    {
-      headers: { Authorization: `Bearer ${vercelPAT}` },
-    },
-  );
+const jobOptions = {
+  attempts: 3,
+  backoff: { type: "exponential", delay: 5000 },
+  removeOnComplete: { count: 100 },
+  removeOnFail: { count: 50 },
+};
 
-  if (res.status === 401 || res.status === 403) {
-    throw new UnrecoverableError(
-      `Vercel auth failed (${res.status}) — check your PAT`,
-    );
-  }
-  if (!res.ok) {
-    throw new Error(`Vercel API error: ${res.status}`);
-  }
+const patchQueue = new Queue(queueConfig.queue2.name, { connection: redisConfig });
 
-  const data = await res.json();
-  return data
-    .map((event: any) => event.text)
-    .filter((text: any) => typeof text === "string" && text.trim() !== "")
+async function fetchDeploymentLogs(deploymentId: string, vercelPAT: string) {
+  const metaRes = await fetch(`https://api.vercel.com/v13/deployments/${deploymentId}`, {
+    headers: { Authorization: `Bearer ${vercelPAT}` },
+  });
+
+  if (metaRes.status === 401 || metaRes.status === 403)
+    throw new UnrecoverableError(`Vercel auth failed (${metaRes.status}) — check your PAT`);
+  if (!metaRes.ok)
+    throw new Error(`Vercel metadata API error: ${metaRes.status}`);
+
+  const metaData = await metaRes.json();
+
+  const eventsRes = await fetch(`https://api.vercel.com/v3/deployments/${deploymentId}/events`, {
+    headers: { Authorization: `Bearer ${vercelPAT}` },
+  });
+
+  if (eventsRes.status === 401 || eventsRes.status === 403)
+    throw new UnrecoverableError(`Vercel auth failed (${eventsRes.status}) — check your PAT`);
+  if (!eventsRes.ok)
+    throw new Error(`Vercel events API error: ${eventsRes.status}`);
+
+  const events = await eventsRes.json();
+  const logs = events
+    .map((e: any) => e.text)
+    .filter((t: any) => typeof t === "string" && t.trim())
     .join("\n");
+
+  return {
+    logs,
+    repoName: metaData.meta?.githubRepo || "",
+    owner: metaData.meta?.githubCommitOrg || metaData.meta?.githubOrg || "iaadi4",
+    commitSha: metaData.gitSource?.sha || metaData.meta?.githubCommitSha || "",
+    rootDirectory: (metaData.rootDirectory as string | null) ?? null,
+  };
 }
 
 const worker = new Worker(
-  queueConfig.queue.name,
+  queueConfig.queue1.name,
   async (job: Job<DeploymentJobData>) => {
-    const { deploymentId, vercelPAT, projectId } = job.data;
+    const { deploymentId, vercelPAT } = job.data;
+    logger.info({ jobId: job.id, deploymentId, attempt: job.attemptsMade + 1 }, "Job started");
 
-    logger.info(
-      { jobId: job.id, deploymentId, attempt: job.attemptsMade + 1 },
-      "Job started",
-    );
-
-    const logs = await fetchDeploymentLogs(deploymentId, vercelPAT);
-    if (!logs.trim()) {
-      logger.warn({ jobId: job.id }, "No logs returned — skipping LLM");
+    const result = await fetchDeploymentLogs(deploymentId, vercelPAT);
+    if (!result.logs.trim()) {
+      logger.warn({ jobId: job.id }, "No logs returned — skipping");
       return;
     }
 
-    const result = await runLLMDebugger(deploymentId, logs);
-    logger.info({ jobId: job.id, result }, "Debug result ready");
+    const llmOutput = await runLLMDebugger(deploymentId, result.logs);
+    logger.info({ jobId: job.id, confidence: llmOutput.confidence, patchCount: llmOutput.patches.length }, "LLM debug complete");
+
+    const formatFixes = (fix: string | string[]) =>
+      (Array.isArray(fix) ? fix : [fix]).map((f, i) => `${i + 1}. ${f}`).join("\n");
+
+    const formatFiles = (files: typeof llmOutput.affectedFiles) => {
+      if (!files?.length) return "_No specific files identified._";
+      return files.map((f) => {
+        const loc = f.lineNumber ? ` · Line ${f.lineNumber}` : "";
+        const snip = f.snippet ? `\n\`\`\`\n${f.snippet}\n\`\`\`` : "";
+        return `- \`${f.filePath}\`${loc}${snip}`;
+      }).join("\n");
+    };
+
+    const confidenceBadge = { high: "🟢 HIGH", medium: "🟡 MEDIUM", low: "🔴 LOW" };
+    const refsSection = llmOutput.references?.length
+      ? `\n### 🔗 Helpful references\n\n${llmOutput.references.map((r) => `- [${r}](${r})`).join("\n")}\n`
+      : "";
+
+    const body = `### 🔍 VercelLens build analysis
+
+> **Repo:** \`${result.repoName}\` · **Commit:** \`${result.commitSha.slice(0, 7)}\`
+
+The latest Vercel deployment failed during build.
+
+---
+
+### 📝 Summary
+
+${llmOutput.summary}
+
+### 🚨 Root cause
+
+${llmOutput.rootCause}
+
+---
+
+### 🛠️ Suggested fixes
+
+${formatFixes(llmOutput.suggestedFix)}
+
+### 📂 Affected files
+
+${formatFiles(llmOutput.affectedFiles)}
+${refsSection}
+---
+
+_Generated by VercelLens · Confidence: ${confidenceBadge[llmOutput.confidence]}_`;
+
+    await patchQueue.add(
+      "apply-patches",
+      {
+        owner: result.owner,
+        repo: result.repoName,
+        commitSha: result.commitSha,
+        rootDirectory: result.rootDirectory,
+        patches: llmOutput.patches,
+        body,
+        attempt: 1,
+      },
+      jobOptions,
+    );
   },
-  {
-    connection: redisConfig,
-    lockDuration: 5 * 60 * 1000,
-  },
+  { connection: redisConfig, lockDuration: 5 * 60 * 1000 },
 );
 
-worker.on("failed", (job, err) => {
-  logger.error(
-    { jobId: job?.id, deploymentId: job?.data?.deploymentId, err: err.message },
-    "Job failed",
-  );
-});
-
-worker.on("completed", (job) => {
-  logger.info({ jobId: job.id }, "Job completed");
-});
+worker.on("failed", (job, err) =>
+  logger.error({ jobId: job?.id, deploymentId: job?.data?.deploymentId, err: err.message }, "Job failed"),
+);
+worker.on("completed", (job) =>
+  logger.info({ jobId: job.id }, "Job completed"),
+);

@@ -5,11 +5,14 @@ import { queueConfig } from "../configs/queue.configs";
 import { logger } from "../utils/logger.utils";
 import Send from "../utils/response.utils";
 
-const queue = new Queue(queueConfig.queue.name, {
-  connection: {
-    host: queueConfig.redis.host,
-    port: queueConfig.redis.port,
-  },
+const redisConfig = {
+  host: queueConfig.redis.host,
+  port: queueConfig.redis.port,
+};
+
+
+const queue = new Queue(queueConfig.queue1.name, {
+  connection: redisConfig
 });
 
 const jobOptions = {
